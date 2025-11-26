@@ -706,6 +706,67 @@ def load_css():
             animation: blink 1.5s infinite;
             color: #22c55e; /* Green */
         }
+        /* Result Card */
+        .result-card {
+            background-color: #1f2937;
+            border: 1px solid #374151;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            transition: transform 0.2s;
+        }
+        .result-card:hover {
+            transform: translateY(-2px);
+            border-color: #4b5563;
+        }
+        .result-card.qualified {
+            border-left: 4px solid #22c55e;
+        }
+        .result-card.not-qualified {
+            border-left: 4px solid #ef4444;
+        }
+        .rc-rank {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #9ca3af;
+            width: 40px;
+            text-align: center;
+        }
+        .rc-info {
+            flex-grow: 1;
+            padding: 0 15px;
+        }
+        .rc-name {
+            font-size: 1.1em;
+            font-weight: bold;
+            color: #f3f4f6;
+            margin-bottom: 2px;
+        }
+        .rc-club {
+            font-size: 0.85em;
+            color: #9ca3af;
+        }
+        .rc-perf-box {
+            text-align: right;
+            min-width: 80px;
+        }
+        .rc-perf {
+            font-size: 1.4em;
+            font-weight: bold;
+            color: #ffffff;
+        }
+        .rc-wind {
+            font-size: 0.8em;
+            color: #9ca3af;
+        }
+        .rc-details {
+            font-size: 0.8em;
+            color: #6b7280;
+            margin-top: 4px;
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -824,39 +885,47 @@ def render_results_split(df, cutoff_rank=24):
     # Toggle Mobile View
     c_toggle, _ = st.columns([1, 3])
     with c_toggle:
-        mobile_view = st.toggle("📱 Vue Mobile (Cartes)", value=False)
+        card_view = st.toggle("📱 Vue Cartes (Mobile)", value=True)
 
-    if mobile_view:
-        # MOBILE CARD VIEW
+    if card_view:
+        # CUSTOM HTML CARD VIEW
         for index, row in df.iterrows():
-            # Header of the card
-            q_icon = row['Q']
-            label = f"#{row['Rang']} {row['Athlète']} - {row['Perf']}"
+            is_qualified = row['Q'] == "✅"
+            card_class = "qualified" if is_qualified else "not-qualified"
             
-            with st.expander(f"{q_icon} {label}"):
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.caption("Club")
-                    st.write(row['Club'])
-                    st.caption("Points")
-                    st.write(f"**{row.get('Pts', 'N/A')}**")
-                with c2:
-                    st.caption("Lieu & Date")
-                    st.write(f"{row['Lieu']} ({row.get('Date', '')})")
-                    st.caption("Statut")
-                    st.write(row['Info'] if row['Info'] else "-")
-                
-                st.divider()
-                
-                # Qualification Status
-                if row['Q'] == "✅":
-                    st.success(f"Qualifié (Top {cutoff_rank})")
-                else:
-                    st.error(f"Non Qualifié (Cut à {row['Ecart_Str']})")
-                    
-                # Link
-                if row.get('Lien'):
-                    st.markdown(f"[Voir Fiche FFA]({row['Lien']})")
+            # Data preparation
+            rank = row['Rang']
+            name = row['Athlète']
+            club = row['Club']
+            perf = row['Perf']
+            wind = row.get('Vent', '')
+            pts = row.get('Pts', '-')
+            date = row.get('Date', '')
+            place = row['Lieu']
+            
+            # Link handling
+            link_html = ""
+            if row.get('Lien'):
+                link_html = f'<a href="{row["Lien"]}" target="_blank" style="text-decoration:none; color:inherit;">'
+            
+            close_link_html = "</a>" if link_html else ""
+            
+            st.markdown(f"""
+            {link_html}
+            <div class="result-card {card_class}">
+                <div class="rc-rank">#{rank}</div>
+                <div class="rc-info">
+                    <div class="rc-name">{name}</div>
+                    <div class="rc-club">{club}</div>
+                    <div class="rc-details">{place} • {date} • {pts}</div>
+                </div>
+                <div class="rc-perf-box">
+                    <div class="rc-perf">{perf}</div>
+                    <div class="rc-wind">{wind}</div>
+                </div>
+            </div>
+            {close_link_html}
+            """, unsafe_allow_html=True)
 
     else:
         # DESKTOP TABLE VIEW
