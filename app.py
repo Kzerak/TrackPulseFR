@@ -435,6 +435,7 @@ class FFAScraper:
                             "Info": perf_info['badge'],
                             "Club": club,
                             "Catégorie": cat_info,
+                            "Date": cols[-2].text.strip(),
                             "Lieu": cols[-1].text.strip()
                         })
 
@@ -820,27 +821,64 @@ def render_results_split(df, cutoff_rank=24):
         df["Ecart_Str"] = "-"
         cutoff_perf = "N/A"
 
-    # Columns to show
-    cols_config = {
-        "Rang": st.column_config.NumberColumn("RANG", format="%d", width="small"),
-        "Athlète": st.column_config.TextColumn("ATHLÈTE & CLUB", width="large"),
-        "Perf": st.column_config.TextColumn("PERF (VENT)", width="medium"),
-        "Pts": st.column_config.TextColumn("POINTS", width="small"),
-        "Info": st.column_config.TextColumn("STATUT", width="small"),
-        "Ecart_Str": st.column_config.TextColumn("ÉCART CUT", width="small"),
-        "Q": st.column_config.TextColumn("Q", width="small"),
-    }
-    
-    display_cols = ["Rang", "Athlète", "Perf", "Pts", "Info", "Ecart_Str", "Q"]
-    
-    # SINGLE TABLE DISPLAY
-    st.dataframe(
-        df[display_cols],
-        use_container_width=True,
-        column_config=cols_config,
-        hide_index=True,
-        height=(len(df) + 1) * 35 + 3 # Auto-height approximation
-    )
+    # Toggle Mobile View
+    c_toggle, _ = st.columns([1, 3])
+    with c_toggle:
+        mobile_view = st.toggle("📱 Vue Mobile (Cartes)", value=False)
+
+    if mobile_view:
+        # MOBILE CARD VIEW
+        for index, row in df.iterrows():
+            # Header of the card
+            q_icon = row['Q']
+            label = f"#{row['Rang']} {row['Athlète']} - {row['Perf']}"
+            
+            with st.expander(f"{q_icon} {label}"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.caption("Club")
+                    st.write(row['Club'])
+                    st.caption("Points")
+                    st.write(f"**{row.get('Pts', 'N/A')}**")
+                with c2:
+                    st.caption("Lieu & Date")
+                    st.write(f"{row['Lieu']} ({row.get('Date', '')})")
+                    st.caption("Statut")
+                    st.write(row['Info'] if row['Info'] else "-")
+                
+                st.divider()
+                
+                # Qualification Status
+                if row['Q'] == "✅":
+                    st.success(f"Qualifié (Top {cutoff_rank})")
+                else:
+                    st.error(f"Non Qualifié (Cut à {row['Ecart_Str']})")
+                    
+                # Link
+                if row.get('Lien'):
+                    st.markdown(f"[Voir Fiche FFA]({row['Lien']})")
+
+    else:
+        # DESKTOP TABLE VIEW
+        cols_config = {
+            "Rang": st.column_config.NumberColumn("RANG", format="%d", width="small"),
+            "Athlète": st.column_config.TextColumn("ATHLÈTE & CLUB", width="large"),
+            "Perf": st.column_config.TextColumn("PERF (VENT)", width="medium"),
+            "Pts": st.column_config.TextColumn("POINTS", width="small"),
+            "Info": st.column_config.TextColumn("STATUT", width="small"),
+            "Ecart_Str": st.column_config.TextColumn("ÉCART CUT", width="small"),
+            "Q": st.column_config.TextColumn("Q", width="small"),
+        }
+        
+        display_cols = ["Rang", "Athlète", "Perf", "Pts", "Info", "Ecart_Str", "Q"]
+        
+        st.dataframe(
+            df[display_cols],
+            use_container_width=True,
+            column_config=cols_config,
+            hide_index=True,
+            height=(len(df) + 1) * 35 + 3
+        )
 
 def render_profile_tab(genre_code):
     """Affiche l'onglet Profil Athlète"""
