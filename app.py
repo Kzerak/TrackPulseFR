@@ -498,8 +498,22 @@ class FFAScraper:
             
             info = {"url": url}
             
-            # --- Auto-détection du genre ---
+            # --- Metadata Extraction ---
             page_text = soup.get_text()
+            
+            # Club
+            club_match = re.search(r"Club\s*:\s*(.+?)(?:\n|\r|\t|  )", page_text)
+            info['club'] = club_match.group(1).strip() if club_match else "N/A"
+            
+            # Category
+            cat_match = re.search(r"Catégorie\s*:\s*(\w+)", page_text)
+            info['category'] = cat_match.group(1).strip() if cat_match else "N/A"
+            
+            # Birth Year
+            birth_match = re.search(r"Né\(e\) en\s*(\d{4})", page_text)
+            info['birth_year'] = birth_match.group(1).strip() if birth_match else ""
+
+            # --- Auto-détection du genre ---
             cats_f = re.findall(r"\b(SEF|ESF|JUF|CAF|MIF|BEF|POF|VEF)\b", page_text)
             cats_m = re.findall(r"\b(SEM|ESM|JUM|CAM|MIM|BEM|POM|VEM)\b", page_text)
             
@@ -1026,7 +1040,7 @@ def render_results_split(df, cutoff_rank=24):
         {close_link_html}
         """, unsafe_allow_html=True)
 
-def render_profile_tab(genre_code, athlete_url=None):
+def render_profile_tab(genre_code, athlete_url=None, athlete_name=None):
     """Affiche l'onglet Profil Athlète"""
     st.header("👤 Fiche Athlète")
     
@@ -1035,8 +1049,7 @@ def render_profile_tab(genre_code, athlete_url=None):
     
     # Mode Recherche (URL fournie directement)
     if athlete_url:
-        # On essaie d'extraire le nom de l'URL ou on met un placeholder
-        selected_athlete = "Athlète Sélectionné" 
+        selected_athlete = athlete_name if athlete_name else "Athlète Sélectionné" 
     
     # Mode Liste (Depuis le classement)
     elif 'df_results' in st.session_state and not st.session_state['df_results'].empty:
@@ -1060,14 +1073,25 @@ def render_profile_tab(genre_code, athlete_url=None):
                 profile = scraper.get_athlete_profile(url, genre_code)
                 if profile and profile.get('records'):
                     # Header Profil
-                    c1, c2 = st.columns([1, 3])
-                    with c1:
-                        st.image("https://www.athle.fr/images/icones/no_photo.gif", width=100) # Placeholder
-                    with c2:
-                        # Try to get name from profile if available, else use selected
-                        name_display = selected_athlete
-                        st.subheader(name_display)
-                        st.markdown(f"[Voir sur le site FFA]({url})")
+                    # Nom et Infos
+                    name_display = selected_athlete
+                    st.subheader(name_display)
+                    
+                    infos = []
+                    if profile.get('club') and profile['club'] != "N/A":
+                        infos.append(f"🏢 {profile['club']}")
+                    if profile.get('category') and profile['category'] != "N/A":
+                        infos.append(f"🏷️ {profile['category']}")
+                    if profile.get('birth_year'):
+                        try:
+                            age = 2025 - int(profile['birth_year'])
+                            infos.append(f"🎂 {age} ans ({profile['birth_year']})")
+                        except: pass
+                        
+                    if infos:
+                        st.caption(" | ".join(infos))
+                        
+                    st.markdown(f"[Voir sur le site FFA]({url})")
 
                     st.divider()
                     
@@ -1638,7 +1662,7 @@ elif nav_mode == "ATHLÈTES":
         if selected_athlete_name:
             search_url = athlete_index.search(selected_athlete_name)
             
-        render_profile_tab(current_genre, athlete_url=search_url)
+        render_profile_tab(current_genre, athlete_url=search_url, athlete_name=selected_athlete_name)
         
     with tab_duel:
         current_genre = st.session_state.get('current_genre_code', 'M')
