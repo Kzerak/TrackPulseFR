@@ -1603,6 +1603,19 @@ if nav_mode == "CLASSEMENTS":
                     st.session_state['current_page'] = next_page
                     st.rerun()
                 else:
+                    st.warning("Plus de résultats disponibles.")
+        
+    else:
+        st.info("Cliquez sur ACTUALISER pour charger les résultats.")
+
+elif nav_mode == "ATHLÈTES":
+    st.title("Espace Athlètes")
+    
+    # Initialize Athlete Index
+    athlete_index = AthleteIndex()
+    athlete_index.load_index()
+    
+    # Search UI
     col_search, col_btn = st.columns([3, 1])
     with col_search:
         # Get all athlete names for autocomplete
