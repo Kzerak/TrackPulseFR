@@ -1,4 +1,5 @@
 import math
+import os
 import streamlit as st
 import pandas as pd
 import requests
@@ -7,6 +8,11 @@ import re
 import time
 import random
 from urllib.parse import urljoin
+from prediction_pipeline import PredictionPipeline
+
+@st.cache_resource
+def get_prediction_pipeline():
+    return PredictionPipeline()
 
 # ==========================================
 # 1. CONFIGURATION
@@ -32,6 +38,33 @@ MINIMA_CF = {
 # ==========================================
 # 2. MOTEUR DE SCRAPING ROBUSTE
 # ==========================================
+
+class AthleteIndex:
+    """
+    Gère un index local des athlètes pour la recherche rapide.
+    """
+    INDEX_FILE = "athletes_index.csv"
+    
+    def __init__(self):
+        self.index = {} # Name -> URL
+        self.load_index()
+        
+    def load_index(self):
+        if os.path.exists(self.INDEX_FILE):
+            try:
+                df = pd.read_csv(self.INDEX_FILE)
+                if 'Athlète' in df.columns and 'Lien' in df.columns:
+                    # Create dictionary for fast lookup
+                    self.index = pd.Series(df.Lien.values, index=df.Athlète).to_dict()
+            except Exception as e:
+                print(f"Erreur chargement index: {e}")
+                self.index = {}
+        else:
+            self.index = {}
+
+    def search(self, name):
+        """Retourne l'URL pour un nom donné"""
+        return self.index.get(name)
 
 class ScoringSystem:
     # Coefficients Table Hongroise (IAAF 2017 / WMA 2023)
@@ -343,10 +376,13 @@ class FFAScraper:
                     
         return True
 
-    def get_rankings(self, event_code, year, gender_code, category_code=""):
+    def get_rankings(self, event_code, year, gender_code, category_code="", page=1):
         """
         Récupère le tableau exact de ton screenshot
         """
+        # Pagination : 0 pour page 1, 1 pour page 2, etc. (Index de page)
+        position = page - 1
+        
         params = {
             "frmbase": "bilans",
             "frmmode": "1",
@@ -355,6 +391,7 @@ class FFAScraper:
             "frmepreuve": event_code,
             "frmsexe": gender_code,
             "frmcategorie": category_code,
+            "frmposition": position,
             "frmpostback": "true"
         }
         
@@ -443,8 +480,7 @@ class FFAScraper:
                         continue
 
             df = pd.DataFrame(data)
-            if not df.empty:
-                df['Rang'] = df['Chrono'].rank(method='min').astype(int)
+            # Note: On ne recalcule pas le rang ici car on va concaténer plusieurs pages
             return df
             
         except Exception as e:
@@ -461,6 +497,19 @@ class FFAScraper:
             soup = BeautifulSoup(response.text, 'html.parser')
             
             info = {"url": url}
+            
+            # --- Auto-détection du genre ---
+            page_text = soup.get_text()
+            cats_f = re.findall(r"\b(SEF|ESF|JUF|CAF|MIF|BEF|POF|VEF)\b", page_text)
+            cats_m = re.findall(r"\b(SEM|ESM|JUM|CAM|MIM|BEM|POM|VEM)\b", page_text)
+            
+            if len(cats_f) > len(cats_m):
+                gender = 'F'
+            elif len(cats_m) > len(cats_f):
+                gender = 'M'
+                
+            info['gender'] = gender
+            
             tables = soup.find_all('table')
             records_data = []
             
@@ -732,26 +781,44 @@ def load_css():
             font-size: 1.2em;
             font-weight: bold;
             color: #9ca3af;
-            width: 40px;
+            width: 50px; /* Wider for 3 digits */
             text-align: center;
+            flex-shrink: 0;
         }
+        .rc-rank.gold { color: #fbbf24; text-shadow: 0 0 10px rgba(251, 191, 36, 0.3); }
+        .rc-rank.silver { color: #9ca3af; text-shadow: 0 0 10px rgba(156, 163, 175, 0.3); }
+        .rc-rank.bronze { color: #b45309; text-shadow: 0 0 10px rgba(180, 83, 9, 0.3); }
+        
         .rc-info {
             flex-grow: 1;
             padding: 0 15px;
+            overflow: hidden;
         }
         .rc-name {
             font-size: 1.1em;
             font-weight: bold;
             color: #f3f4f6;
             margin-bottom: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .rc-club {
             font-size: 0.85em;
             color: #9ca3af;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .rc-details {
+            font-size: 0.75em;
+            color: #6b7280;
+            margin-top: 4px;
         }
         .rc-perf-box {
             text-align: right;
-            min-width: 80px;
+            min-width: 90px;
+            flex-shrink: 0;
         }
         .rc-perf {
             font-size: 1.4em;
@@ -762,10 +829,22 @@ def load_css():
             font-size: 0.8em;
             color: #9ca3af;
         }
-        .rc-details {
-            font-size: 0.8em;
-            color: #6b7280;
-            margin-top: 4px;
+        .rc-gap {
+            font-size: 0.75em;
+            font-weight: bold;
+            margin-top: 2px;
+        }
+        .rc-gap.cut-ok { color: #22c55e; }
+        .rc-gap.cut-ko { color: #ef4444; }
+        .rc-status {
+            font-size: 0.75em;
+            color: #3b82f6;
+            font-weight: bold;
+        }
+        .rc-points {
+            color: #60a5fa; /* Blue-400 */
+            font-weight: bold;
+            font-size: 0.9em;
         }
         </style>
     """, unsafe_allow_html=True)
@@ -852,7 +931,13 @@ def render_filters_horizontal():
             st.write("") # Spacer
             if st.button("ACTUALISER", type="primary", use_container_width=True):
                 with st.spinner("Chargement..."):
-                    df = scraper.get_rankings(epreuve_code, annee, genre_code, cat_code)
+                    st.session_state['current_page'] = 1
+                    # Sauvegarde du contexte de recherche
+                    st.session_state['current_genre_code'] = genre_code
+                    
+                    df = scraper.get_rankings(epreuve_code, annee, genre_code, cat_code, page=1)
+                    if not df.empty:
+                        df['Rang'] = df['Chrono'].rank(method='min').astype(int)
                     st.session_state['df_results'] = df
                     
     return annee, epreuve_label, epreuve_code, genre_label, genre_code, cat_label, cat_code
@@ -882,139 +967,238 @@ def render_results_split(df, cutoff_rank=24):
         df["Ecart_Str"] = "-"
         cutoff_perf = "N/A"
 
-    # Toggle Mobile View
-    c_toggle, _ = st.columns([1, 3])
-    with c_toggle:
-        card_view = st.toggle("📱 Vue Cartes (Mobile)", value=True)
+    # Permanent Card View
+    # CUSTOM HTML CARD VIEW
+    for index, row in df.iterrows():
+        is_qualified = row['Q'] == "✅"
+        card_class = "qualified" if is_qualified else "not-qualified"
+        
+        # Data preparation
+        rank = row['Rang']
+        name = row['Athlète']
+        club = row['Club']
+        perf = row['Perf']
+        wind = row.get('Vent', '')
+        pts = row.get('Pts', '-')
+        date = row.get('Date', '')
+        place = row['Lieu']
+        info = row.get('Info', '')
+        ecart = row.get('Ecart_Str', '')
+        
+        # Medal Styling
+        rank_class = "rc-rank"
+        if rank == 1: rank_class += " gold"
+        elif rank == 2: rank_class += " silver"
+        elif rank == 3: rank_class += " bronze"
+        
+        # Gap Styling
+        gap_html = ""
+        if ecart != "-" and ecart != "CUT":
+             gap_class = "cut-ok" if is_qualified else "cut-ko"
+             gap_html = f'<div class="rc-gap {gap_class}">Cut {ecart}</div>'
+        
+        # Status HTML (RP/SB)
+        status_html = ""
+        if info:
+            status_html = f'<span class="rc-status">{info}</span> • '
 
-    if card_view:
-        # CUSTOM HTML CARD VIEW
-        for index, row in df.iterrows():
-            is_qualified = row['Q'] == "✅"
-            card_class = "qualified" if is_qualified else "not-qualified"
-            
-            # Data preparation
-            rank = row['Rang']
-            name = row['Athlète']
-            club = row['Club']
-            perf = row['Perf']
-            wind = row.get('Vent', '')
-            pts = row.get('Pts', '-')
-            date = row.get('Date', '')
-            place = row['Lieu']
-            
-            # Link handling
-            link_html = ""
-            if row.get('Lien'):
-                link_html = f'<a href="{row["Lien"]}" target="_blank" style="text-decoration:none; color:inherit;">'
-            
-            close_link_html = "</a>" if link_html else ""
-            
-            st.markdown(f"""
-            {link_html}
-            <div class="result-card {card_class}">
-                <div class="rc-rank">#{rank}</div>
-                <div class="rc-info">
-                    <div class="rc-name">{name}</div>
-                    <div class="rc-club">{club}</div>
-                    <div class="rc-details">{place} • {date} • {pts}</div>
-                </div>
-                <div class="rc-perf-box">
-                    <div class="rc-perf">{perf}</div>
-                    <div class="rc-wind">{wind}</div>
-                </div>
+        # Link handling
+        link_html = ""
+        if row.get('Lien'):
+            link_html = f'<a href="{row["Lien"]}" target="_blank" style="text-decoration:none; color:inherit;">'
+        
+        close_link_html = "</a>" if link_html else ""
+        
+        # Points Styling
+        pts_html = f'<span class="rc-points">{pts}</span>' if pts != "-" else "-"
+
+        st.markdown(f"""
+        {link_html}
+        <div class="result-card {card_class}">
+            <div class="{rank_class}">#{rank}</div>
+            <div class="rc-info">
+                <div class="rc-name">{name}</div>
+                <div class="rc-club">{status_html}{club}</div>
+                <div class="rc-details">{place} • {date} • {pts_html}</div>
             </div>
-            {close_link_html}
-            """, unsafe_allow_html=True)
+            <div class="rc-perf-box"><div class="rc-perf">{perf}</div><div class="rc-wind">{wind}</div>{gap_html}</div>
+        </div>
+        {close_link_html}
+        """, unsafe_allow_html=True)
 
-    else:
-        # DESKTOP TABLE VIEW
-        cols_config = {
-            "Rang": st.column_config.NumberColumn("RANG", format="%d", width="small"),
-            "Athlète": st.column_config.TextColumn("ATHLÈTE & CLUB", width="large"),
-            "Perf": st.column_config.TextColumn("PERF (VENT)", width="medium"),
-            "Pts": st.column_config.TextColumn("POINTS", width="small"),
-            "Info": st.column_config.TextColumn("STATUT", width="small"),
-            "Ecart_Str": st.column_config.TextColumn("ÉCART CUT", width="small"),
-            "Q": st.column_config.TextColumn("Q", width="small"),
-        }
-        
-        display_cols = ["Rang", "Athlète", "Perf", "Pts", "Info", "Ecart_Str", "Q"]
-        
-        st.dataframe(
-            df[display_cols],
-            use_container_width=True,
-            column_config=cols_config,
-            hide_index=True,
-            height=(len(df) + 1) * 35 + 3
-        )
-
-def render_profile_tab(genre_code):
+def render_profile_tab(genre_code, athlete_url=None):
     """Affiche l'onglet Profil Athlète"""
     st.header("👤 Fiche Athlète")
     
-    if 'df_results' in st.session_state and not st.session_state['df_results'].empty:
+    selected_athlete = None
+    url = athlete_url
+    
+    # Mode Recherche (URL fournie directement)
+    if athlete_url:
+        # On essaie d'extraire le nom de l'URL ou on met un placeholder
+        selected_athlete = "Athlète Sélectionné" 
+    
+    # Mode Liste (Depuis le classement)
+    elif 'df_results' in st.session_state and not st.session_state['df_results'].empty:
         df = st.session_state['df_results']
         athlete_list = df['Athlète'].tolist()
-        selected_athlete = st.selectbox("Rechercher un athlète", athlete_list)
-        
+        selected_athlete = st.selectbox("Rechercher un athlète dans le classement", athlete_list)
         if selected_athlete:
             row = df[df['Athlète'] == selected_athlete].iloc[0]
             url = row.get('Lien')
-            
-            if url:
-                if st.button(f"Voir la fiche de {selected_athlete}", use_container_width=True):
-                    with st.spinner("Chargement du profil..."):
-                        profile = scraper.get_athlete_profile(url, genre_code)
-                        if profile and profile.get('records'):
-                            # Header Profil
-                            c1, c2 = st.columns([1, 3])
-                            with c1:
-                                st.image("https://www.athle.fr/images/icones/no_photo.gif", width=100) # Placeholder
-                            with c2:
-                                st.subheader(selected_athlete)
-                                st.caption(f"Club: {row.get('Club', 'N/A')} | Cat: {row.get('Catégorie', 'N/A')}")
-                                st.markdown(f"[Voir sur le site FFA]({url})")
-
-                            st.divider()
-                            
-                            df_sprint = pd.DataFrame([r for r in profile['records'] if r['IsSprint']]).copy()
-                            df_other = pd.DataFrame([r for r in profile['records'] if not r['IsSprint']]).copy()
-                            
-                            # SPRINT CARDS
-                            st.subheader("⚡ Records Sprint")
-                            if not df_sprint.empty:
-                                order = {"60m": 1, "100m": 2, "200m": 3, "400m": 4}
-                                df_sprint['Order'] = df_sprint['Epreuve'].map(order)
-                                df_sprint = df_sprint.sort_values("Order")
-                                
-                                cols = st.columns(4)
-                                for idx, row_rec in enumerate(df_sprint.itertuples()):
-                                    with cols[idx % 4]:
-                                        st.metric(
-                                            label=row_rec.Epreuve,
-                                            value=row_rec.Perf,
-                                            delta=f"{row_rec.Pts} pts ({row_rec.Niveau})" if row_rec.Pts else None,
-                                            delta_color="normal"
-                                        )
-                                        st.caption(f"📍 {row_rec.Lieu} ({row_rec.Date})")
-                            else:
-                                st.info("Aucun record de sprint.")
-
-                            # OTHER RECORDS
-                            if not df_other.empty:
-                                st.subheader("🏅 Autres Records")
-                                st.dataframe(
-                                    df_other[["Epreuve", "Perf"]],
-                                    use_container_width=True,
-                                    hide_index=True
-                                )
-                        else:
-                            st.error("Impossible de charger le profil.")
-            else:
-                st.warning("Pas de lien disponible.")
     else:
-        st.info("Veuillez d'abord charger un classement.")
+        if not athlete_url:
+            st.info("Utilisez la recherche ci-dessus ou chargez un classement.")
+            return
+
+    if url:
+        # Auto-load if URL is provided (search mode) or button clicked (list mode)
+        should_load = True if athlete_url else st.button(f"Voir la fiche de {selected_athlete}", use_container_width=True)
+        
+        if should_load:
+            with st.spinner("Chargement du profil..."):
+                profile = scraper.get_athlete_profile(url, genre_code)
+                if profile and profile.get('records'):
+                    # Header Profil
+                    c1, c2 = st.columns([1, 3])
+                    with c1:
+                        st.image("https://www.athle.fr/images/icones/no_photo.gif", width=100) # Placeholder
+                    with c2:
+                        # Try to get name from profile if available, else use selected
+                        name_display = selected_athlete
+                        st.subheader(name_display)
+                        st.markdown(f"[Voir sur le site FFA]({url})")
+
+                    st.divider()
+                    
+                    # --- PREDICTION SECTION (V3) ---
+                    st.subheader("🔮 Potentiel Saison 2025")
+                    
+                    pipeline = get_prediction_pipeline()
+                    with st.spinner("Analyse de la forme et du potentiel..."):
+                        pred_res = pipeline.run_pipeline(url, season_year=2025, verbose=False)
+                        
+                    if pred_res:
+                        p_real = pred_res['p_real_pred']
+                        features = pred_res['features']
+                        
+                        # Confidence Interval (Based on MAPE 1.35% -> approx +/- 0.13s for 10s)
+                        # Let's use a fixed margin or percentage.
+                        # MAPE is Mean Absolute Percentage Error.
+                        # Margin = p_real * 0.0135
+                        margin = p_real * 0.0135
+                        low = p_real - margin
+                        high = p_real + margin
+                        
+                        # Layout
+                        c_pred, c_conf, c_feat = st.columns([1.5, 1.5, 3])
+                        
+                        with c_pred:
+                            st.metric(
+                                "Chrono Potentiel", 
+                                f"{p_real:.2f}s", 
+                                help="Performance réalisable à 0 vent en pic de forme"
+                            )
+                        
+                        with c_conf:
+                            st.metric(
+                                "Intervalle Confiance", 
+                                f"{low:.2f}s - {high:.2f}s",
+                                delta="± 1.35%",
+                                delta_color="off",
+                                help="Basé sur la précision du modèle V3 (MAPE)"
+                            )
+                            
+                        with c_feat:
+                            st.caption("🔍 Facteurs Clés détectés par l'IA :")
+                            # Display key features
+                            sb_early = features.get('SB_Early')
+                            slope = features.get('Slope_Early')
+                            
+                            feat_text = ""
+                            if not pd.isna(sb_early):
+                                feat_text += f"- **Début de saison** : {sb_early:.2f}s (Intrinsèque)\n"
+                            if slope != 0:
+                                trend_str = "📈 En progression" if slope < 0 else "📉 En baisse" # Lower time is better
+                                feat_text += f"- **Tendance** : {trend_str} ({slope:.3f})\n"
+                            
+                            st.markdown(feat_text if feat_text else "Données historiques insuffisantes pour explication détaillée.")
+                        
+                        # Wind Simulation Button
+                        if st.button("💨 Voir avec +2.0 m/s", type="secondary"):
+                            from prediction_pipeline import MureikaModel
+                            # Calculate with +2.0 wind
+                            p_wind = MureikaModel.predict_perf_at_wind(p_real, 2.0, dist="100m")
+                            
+                            # Calculate Interval with +2.0 wind
+                            low_wind = MureikaModel.predict_perf_at_wind(low, 2.0, dist="100m")
+                            high_wind = MureikaModel.predict_perf_at_wind(high, 2.0, dist="100m")
+                            
+                            st.markdown(f"""
+                            <div style="margin-top: 20px;">
+                                <div style="text-align: center; font-size: 24px; color: #555; margin-bottom: 8px;">⬇</div>
+                                <div style="
+                                    background-color: #1E1E1E; 
+                                    border: 1px solid #333; 
+                                    border-left: 5px solid #4CAF50;
+                                    border-radius: 10px; 
+                                    padding: 20px; 
+                                    text-align: center; 
+                                    box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
+                                    <div style="font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 5px;">
+                                        Potentiel (Vent +2.0 m/s)
+                                    </div>
+                                    <div style="font-size: 42px; color: #4CAF50; font-weight: 800; line-height: 1.1; margin-bottom: 5px;">
+                                        🚀 {p_wind:.2f}s
+                                    </div>
+                                    <div style="font-size: 16px; color: #CCC;">
+                                        Intervalle : <span style="color: #FFF; font-weight: bold;">{low_wind:.2f}s - {high_wind:.2f}s</span>
+                                    </div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                            
+                    else:
+                        st.info("Pas assez de données récentes (3 courses min) pour une prédiction fiable.")
+
+                    st.divider()
+                    
+                    df_sprint = pd.DataFrame([r for r in profile['records'] if r['IsSprint']]).copy()
+                    df_other = pd.DataFrame([r for r in profile['records'] if not r['IsSprint']]).copy()
+                    
+                    # SPRINT CARDS
+                    st.subheader("⚡ Records Sprint")
+                    if not df_sprint.empty:
+                        order = {"60m": 1, "100m": 2, "200m": 3, "400m": 4}
+                        df_sprint['Order'] = df_sprint['Epreuve'].map(order)
+                        df_sprint = df_sprint.sort_values("Order")
+                        
+                        cols = st.columns(4)
+                        for idx, row_rec in enumerate(df_sprint.itertuples()):
+                            with cols[idx % 4]:
+                                st.metric(
+                                    label=row_rec.Epreuve,
+                                    value=row_rec.Perf,
+                                    delta=f"{row_rec.Pts} pts ({row_rec.Niveau})" if row_rec.Pts else None,
+                                    delta_color="normal"
+                                )
+                                st.caption(f"📍 {row_rec.Lieu} ({row_rec.Date})")
+                    else:
+                        st.info("Aucun record de sprint.")
+
+                    # OTHER RECORDS
+                    if not df_other.empty:
+                        st.subheader("🏅 Autres Records")
+                        st.dataframe(
+                            df_other[["Epreuve", "Perf"]],
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                else:
+                    st.error("Impossible de charger le profil.")
+    else:
+        st.warning("Pas de lien disponible.")
 
 def render_duel_tab(genre_code="M"):
     """Affiche l'onglet Duel"""
@@ -1102,59 +1286,39 @@ def render_duel_tab(genre_code="M"):
                     url2 = row2.get('Lien')
                     
                     if url1 and url2:
-                        with st.spinner("Analyse des records..."):
-                            p1 = scraper.get_athlete_profile(url1, genre_code)
-                            p2 = scraper.get_athlete_profile(url2, genre_code)
-                            
-                            if p1 and p2 and 'records' in p1 and 'records' in p2:
-                                recs1 = {r['Epreuve']: r for r in p1['records']}
-                                recs2 = {r['Epreuve']: r for r in p2['records']}
+                        try:
+                            with st.spinner("Récupération des records..."):
+                                # Fetch profiles
+                                p1 = scraper.get_athlete_profile(url1, genre_code)
+                                p2 = scraper.get_athlete_profile(url2, genre_code)
                                 
-                                sprints = ["60m", "100m", "200m", "400m"]
-                                
-                                for s in sprints:
-                                    r1 = recs1.get(s)
-                                    r2 = recs2.get(s)
+                                if p1 and p2 and 'records' in p1 and 'records' in p2:
+                                    # Find common events
+                                    r1_map = {r['Epreuve']: r for r in p1['records']}
+                                    r2_map = {r['Epreuve']: r for r in p2['records']}
                                     
-                                    if r1 and r2:
-                                        try:
-                                            # Clean and parse performance
-                                            def parse_perf(p_str):
-                                                return float(re.sub(r"[^\d\.]", "", p_str))
-                                                
-                                            v1 = parse_perf(r1['Perf'])
-                                            v2 = parse_perf(r2['Perf'])
-                                            
-                                            w_idx = 1 if v1 < v2 else 2 if v2 < v1 else 0
-                                            
-                                            st.markdown(f"#### {s}")
+                                    common_events = set(r1_map.keys()) & set(r2_map.keys())
+                                    
+                                    if common_events:
+                                        # Sort events
+                                        sorted_events = sorted(list(common_events))
+                                        
+                                        for evt in sorted_events:
+                                            rec1 = r1_map[evt]
+                                            rec2 = r2_map[evt]
                                             
                                             dc1, dc2 = st.columns(2)
                                             with dc1:
-                                                is_w = (w_idx == 1)
-                                                st.markdown(f"""
-                                                <div class="duel-card {'winner' if is_w else ''}" style="padding: 10px;">
-                                                    <div style="font-size: 0.9em; color: #94a3b8;">{athlete_1}</div>
-                                                    <div style="font-size: 1.5em; font-weight: bold;">{r1['Perf']}</div>
-                                                    <div style="font-size: 0.8em;">{r1['Date'][-4:]}</div>
-                                                </div>
-                                                """, unsafe_allow_html=True)
+                                                st.metric(f"{evt} ({athlete_1})", rec1['Perf'], help=f"{rec1['Lieu']} - {rec1['Date']}")
                                             with dc2:
-                                                is_w = (w_idx == 2)
-                                                st.markdown(f"""
-                                                <div class="duel-card {'winner' if is_w else ''}" style="padding: 10px;">
-                                                    <div style="font-size: 0.9em; color: #94a3b8;">{athlete_2}</div>
-                                                    <div style="font-size: 1.5em; font-weight: bold;">{r2['Perf']}</div>
-                                                    <div style="font-size: 0.8em;">{r2['Date'][-4:]}</div>
-                                                </div>
-                                                """, unsafe_allow_html=True)
-                                            
-                                            st.write("") # Spacer
-                                            
-                                        except:
-                                            pass
-                            else:
-                                st.error("Impossible de récupérer les profils complets.")
+                                                st.metric(f"{evt} ({athlete_2})", rec2['Perf'], help=f"{rec2['Lieu']} - {rec2['Date']}")
+                                            st.divider()
+                                    else:
+                                        st.info("Aucune épreuve commune trouvée dans les records.")
+                                else:
+                                    st.warning("Profils incomplets ou sans records.")
+                        except Exception as e:
+                            st.error(f"Erreur lors de la récupération des profils: {e}")
                     else:
                         st.warning("Liens profils manquants.")
 
@@ -1419,22 +1583,53 @@ if nav_mode == "CLASSEMENTS":
         render_status_bar(f"Top {cutoff} : {cutoff_val}", len(df))
         render_results_split(df, cutoff)
         
-    else:
-        st.info("Cliquez sur ACTUALISER pour charger les résultats.")
-
-elif nav_mode == "ATHLÈTES":
-    st.title("Espace Athlètes")
-    
-    if 'df_results' in st.session_state:
-        tab_profil, tab_duel = st.tabs(["👤 Fiche & Records", "⚔️ Duel (Head-to-Head)"])
-        
-        with tab_profil:
-            render_profile_tab("M") # TODO: Passer le genre correct si possible, ou le déduire
+        # Pagination Button
+        if st.button("Charger plus de résultats ⬇️", use_container_width=True):
+            current_page = st.session_state.get('current_page', 1)
+            next_page = current_page + 1
             
-        with tab_duel:
-            render_duel_tab("M")
-    else:
-        st.warning("Chargez d'abord un classement (Onglet CLASSEMENTS) pour initialiser la base d'athlètes.")
+            with st.spinner(f"Chargement page {next_page}..."):
+                new_df = scraper.get_rankings(epreuve_code, annee, genre_code, cat_code, page=next_page)
+                
+                if not new_df.empty:
+                    # Append and re-rank
+                    combined_df = pd.concat([st.session_state['df_results'], new_df], ignore_index=True)
+                    # Remove duplicates just in case
+                    combined_df = combined_df.drop_duplicates(subset=['Athlète', 'Perf', 'Lieu', 'Date'])
+                    # Re-calculate rank
+                    combined_df['Rang'] = combined_df['Chrono'].rank(method='min').astype(int)
+                    
+                    st.session_state['df_results'] = combined_df
+                    st.session_state['current_page'] = next_page
+                    st.rerun()
+                else:
+    col_search, col_btn = st.columns([3, 1])
+    with col_search:
+        # Get all athlete names for autocomplete
+        all_athletes = list(athlete_index.index.keys())
+        selected_athlete_name = st.selectbox(
+            "🔍 Rechercher un athlète", 
+            options=[""] + all_athletes,
+            format_func=lambda x: x if x else "Tapez un nom...",
+            help="Tapez le nom d'un athlète pour afficher son profil"
+        )
+    
+    # Tabs
+    tab_profil, tab_duel = st.tabs(["👤 Fiche & Records", "⚔️ Duel (Head-to-Head)"])
+    
+    with tab_profil:
+        current_genre = st.session_state.get('current_genre_code', 'M')
+        
+        # If an athlete is selected from search, use their URL
+        search_url = None
+        if selected_athlete_name:
+            search_url = athlete_index.search(selected_athlete_name)
+            
+        render_profile_tab(current_genre, athlete_url=search_url)
+        
+    with tab_duel:
+        current_genre = st.session_state.get('current_genre_code', 'M')
+        render_duel_tab(current_genre)
 
 elif nav_mode == "BOÎTE À OUTILS":
     render_tools_main()
